@@ -125,6 +125,33 @@ sensors  # Should show CPU Package, Core, and NVMe temps
 
 ---
 
+## Important: Automatic Operation Without Frontend
+
+**The backend service (`victus-backend`) automatically enables Better Auto mode on startup** and maintains fan control 24/7, even if the frontend GUI is not running.
+
+### What happens when the service starts:
+1. Backend loads and automatically enters **Better Auto mode**
+2. Fans are controlled based on CPU temperature following the profile in `fan_profile_config.hpp`
+3. Settings persist and reapply every 90 seconds (hardware watchdog)
+4. Frontend (GUI) is **optional** — it's only for manual mode selection and viewing temperatures
+
+### Running without the frontend:
+You don't need to launch the GUI. The service works completely standalone:
+```bash
+# Just check that the service is running
+systemctl status victus-backend.service
+
+# View live logs to see RPM adjustments
+journalctl -u victus-backend -f
+
+# Service automatically enabled on boot
+systemctl is-enabled victus-backend.service  # Should show "enabled"
+```
+
+The frontend GUI only provides a user-friendly interface for selecting modes and viewing status. For pure background operation, the backend does everything automatically.
+
+---
+
 ## User Guide
 
 ### Main UI Sections
