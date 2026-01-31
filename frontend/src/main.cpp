@@ -5,7 +5,6 @@
 #include <string>
 #include <memory>
 #include <gtk/gtk.h>
-#include "keyboard.hpp"
 #include "fan.hpp"
 #include "about.hpp"
 #include "socket.hpp"
@@ -20,14 +19,12 @@ public:
 
 	std::shared_ptr<VictusSocketClient> socket_client;
 	std::unique_ptr<VictusFanControl> fan_control;
-	std::unique_ptr<VictusKeyboardControl> keyboard_control;
 	VictusAbout about;
 
 	VictusControl()
 	{
 		socket_client = std::make_shared<VictusSocketClient>("/run/victus-control/victus_backend.sock");
 		fan_control = std::make_unique<VictusFanControl>(socket_client);
-		keyboard_control = std::make_unique<VictusKeyboardControl>(socket_client);
 
 		window = gtk_window_new();
 		gtk_window_set_title(GTK_WINDOW(window), "victus-control");
@@ -48,13 +45,10 @@ public:
 
 	void add_tabs()
 	{
-		GtkWidget *keyboard_page = keyboard_control->get_page();
 		GtkWidget *fan_page = fan_control->get_page();
 
-		GtkWidget *label_keyboard = gtk_label_new("Keyboard");
 		GtkWidget *label_fan = gtk_label_new("FAN");
 
-		gtk_notebook_append_page(GTK_NOTEBOOK(notebook), keyboard_page, label_keyboard);
 		gtk_notebook_append_page(GTK_NOTEBOOK(notebook), fan_page, label_fan);
 	}
 

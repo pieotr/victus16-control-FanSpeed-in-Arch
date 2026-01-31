@@ -45,17 +45,26 @@ VictusSocketClient::VictusSocketClient(const std::string &path) : socket_path(pa
 		{SET_FAN_SPEED, "SET_FAN_SPEED"},
 		{SET_FAN_MODE, "SET_FAN_MODE"},
 		{GET_FAN_MODE, "GET_FAN_MODE"},
+		{SET_FAN_PROFILE, "SET_FAN_PROFILE"},
+		{GET_CPU_TEMP, "GET_CPU_TEMP"},
+		{GET_ALL_TEMPS, "GET_ALL_TEMPS"},
 		{GET_KEYBOARD_COLOR, "GET_KEYBOARD_COLOR"},
 		{SET_KEYBOARD_COLOR, "SET_KEYBOARD_COLOR"},
 		{GET_KBD_BRIGHTNESS, "GET_KBD_BRIGHTNESS"},
 		{SET_KBD_BRIGHTNESS, "SET_KBD_BRIGHTNESS"},
 	};
 
-	// Don't connect here, connect on first command
+	// Start the queue worker thread
+	queue_worker_thread = std::thread(&VictusSocketClient::queue_worker, this);
 }
 
 VictusSocketClient::~VictusSocketClient()
 {
+	shutdown_queue = true;
+	queue_cv.notify_all();
+	if (queue_worker_thread.joinable()) {
+		queue_worker_thread.join();
+	}
 	close_socket();
 }
 
@@ -142,26 +151,67 @@ std::string VictusSocketClient::send_command(const std::string &command)
 	return std::string(buffer.begin(), buffer.end());
 }
 
+void VictusSocketClient::queue_worker()
+{
+	while (!shutdown_queue) {
+		std::unique_lock<std::mutex> lock(queue_mutex);
+		
+		// Wait until we have space for new requests and there are queued commands
+		queue_cv.wait(lock, [this] {
+			return shutdown_queue || (!command_queue.empty() && active_requests < MAX_CONCURRENT_REQUESTS);
+		});
+
+		if (shutdown_queue && command_queue.empty()) {
+			break;
+		}
+
+		if (!command_queue.empty() && active_requests < MAX_CONCURRENT_REQUESTS) {
+			auto pending = std::move(command_queue.front());
+			command_queue.pop();
+			active_requests++;
+			lock.unlock();
+
+			process_queued_command(std::move(pending));
+
+			lock.lock();
+			active_requests--;
+			queue_cv.notify_all();
+		}
+	}
+}
+
+void VictusSocketClient::process_queued_command(std::unique_ptr<PendingCommand> pending)
+{
+	auto it = command_prefix_map.find(pending->type);
+	if (it != command_prefix_map.end()) {
+		std::string full_command = it->second;
+		if (!pending->command.empty()) {
+			if (it->second.back() != ' ') {
+				full_command += " ";
+			}
+			full_command += pending->command;
+		}
+		std::cout << "Sending command: " << full_command << std::endl;
+		auto result = send_command(full_command);
+		std::cout << "Received response: " << result << std::endl;
+		pending->result.set_value(result);
+	} else {
+		pending->result.set_value("ERROR: Unknown command type");
+	}
+}
+
 std::future<std::string> VictusSocketClient::send_command_async(ServerCommands type, const std::string &command)
 {
-	return std::async(std::launch::async, [this, type, command]()
-					  {
-		auto it = command_prefix_map.find(type);
-		if (it != command_prefix_map.end())
-		{
-			std::string full_command = it->second;
-			if (!command.empty())
-			{
-				if (it->second.back() != ' ')
-				{
-					full_command += " ";
-				}
-				full_command += command;
-			}
-			std::cout << "Sending command: " << full_command << std::endl;
-			auto result = send_command(full_command);
-			std::cout << "Received response: " << result << std::endl;
-			return result;
-		}
-		return std::string("ERROR: Unknown command type"); });
+	auto pending = std::make_unique<PendingCommand>();
+	pending->type = type;
+	pending->command = command;
+	auto future = pending->result.get_future();
+
+	{
+		std::lock_guard<std::mutex> lock(queue_mutex);
+		command_queue.push(std::move(pending));
+	}
+	queue_cv.notify_all();
+
+	return future;
 }

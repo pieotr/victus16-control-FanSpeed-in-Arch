@@ -45,6 +45,10 @@ static std::atomic<bool> cpu_sensor_warned(false);
 static std::atomic<bool> gpu_sensor_warned(false);
 static std::atomic<bool> gpu_usage_warned(false);
 
+// Cache for last read CPU temperature
+static std::mutex cpu_temp_cache_mutex;
+static std::optional<double> last_cpu_temp_c;
+
 struct CpuSampleTimes {
     unsigned long long idle;
     unsigned long long total;
@@ -374,6 +378,13 @@ static ThermalSnapshot collect_snapshot()
     snapshot.gpu_temp_c = read_temperature_celsius(locate_gpu_temp_sensor());
     snapshot.cpu_usage_pct = read_cpu_usage_pct();
     snapshot.gpu_usage_pct = read_gpu_usage_pct();
+    
+    // Cache CPU temperature for get_cpu_temp()
+    if (snapshot.cpu_temp_c) {
+        std::lock_guard<std::mutex> lock(cpu_temp_cache_mutex);
+        last_cpu_temp_c = snapshot.cpu_temp_c;
+    }
+    
     return snapshot;
 }
 
@@ -795,7 +806,7 @@ std::string get_fan_mode()
 {
 	{
 		std::lock_guard<std::mutex> lock(mode_mutex);
-		if (requested_mode == "BETTER_AUTO") {
+		if (requested_mode == "BETTER_AUTO" || requested_mode == "PROFILE") {
 			return requested_mode;
 		}
 	}
@@ -837,6 +848,115 @@ std::string get_fan_mode()
 	}
 }
 
+std::string get_cpu_temp()
+{
+	// Try to read CPU temperature from lm-sensors (sensors command)
+	FILE *sensors_pipe = popen("sensors -A -u 2>/dev/null | grep -m1 'temp.*_input' | awk '{print $2}' | cut -d. -f1", "r");
+	if (sensors_pipe) {
+		char buffer[32];
+		if (fgets(buffer, sizeof(buffer), sensors_pipe)) {
+			pclose(sensors_pipe);
+			char *end;
+			long temp = strtol(buffer, &end, 10);
+			if (end != buffer && temp >= 0 && temp <= 150) {
+				std::lock_guard<std::mutex> lock(cpu_temp_cache_mutex);
+				last_cpu_temp_c = static_cast<double>(temp);
+				return std::to_string(temp);
+			}
+		}
+		pclose(sensors_pipe);
+	}
+	
+	// Fallback to cached temperature
+	std::lock_guard<std::mutex> lock(cpu_temp_cache_mutex);
+	if (last_cpu_temp_c) {
+		return std::to_string(static_cast<int>(*last_cpu_temp_c));
+	}
+	return "N/A";
+}
+
+std::string get_all_temps()
+{
+	// Get CPU temperatures from lm-sensors
+	// Returns: "PKG:48|CORES:40,39,43,45,43,45,45,45,45,45|NVME:37,36"
+	std::string pkg_temp;
+	std::string cores_temp;
+	std::string nvme_temps;
+	
+	FILE *sensors_pipe = popen("sensors -A 2>/dev/null", "r");
+	if (sensors_pipe) {
+		char buffer[256];
+		bool found_package = false;
+		
+		while (fgets(buffer, sizeof(buffer), sensors_pipe)) {
+			std::string line(buffer);
+			
+			// Look for CPU package temperature
+			if (!found_package && line.find("Package id") != std::string::npos) {
+				size_t temp_pos = line.find("+");
+				if (temp_pos != std::string::npos) {
+					size_t end_pos = line.find("°C", temp_pos);
+					if (end_pos != std::string::npos) {
+						std::string temp_str = line.substr(temp_pos + 1, end_pos - temp_pos - 1);
+						double temp_val = std::stod(temp_str);
+						int temp_int = static_cast<int>(temp_val);
+						pkg_temp = std::to_string(temp_int);
+						found_package = true;
+					}
+				}
+			}
+			
+			// Look for CPU Core temperatures
+			if (line.find("Core") != std::string::npos && line.find(":") != std::string::npos) {
+				size_t temp_pos = line.find("+");
+				if (temp_pos != std::string::npos) {
+					size_t end_pos = line.find("°C", temp_pos);
+					if (end_pos != std::string::npos) {
+						std::string temp_str = line.substr(temp_pos + 1, end_pos - temp_pos - 1);
+						double temp_val = std::stod(temp_str);
+						int temp_int = static_cast<int>(temp_val);
+						if (!cores_temp.empty()) cores_temp += ",";
+						cores_temp += std::to_string(temp_int);
+					}
+				}
+			}
+			
+			// Look for ALL NVMe Composite temperatures
+			if (line.find("Composite:") != std::string::npos) {
+				size_t temp_pos = line.find("+");
+				if (temp_pos != std::string::npos) {
+					size_t end_pos = line.find("°C", temp_pos);
+					if (end_pos != std::string::npos) {
+						std::string temp_str = line.substr(temp_pos + 1, end_pos - temp_pos - 1);
+						double temp_val = std::stod(temp_str);
+						int temp_int = static_cast<int>(temp_val);
+						if (!nvme_temps.empty()) nvme_temps += ",";
+						nvme_temps += std::to_string(temp_int);
+					}
+				}
+			}
+		}
+		pclose(sensors_pipe);
+	}
+	
+	// Build result string with labels
+	std::string result;
+	if (!pkg_temp.empty()) {
+		result += "PKG:" + pkg_temp;
+	}
+	if (!cores_temp.empty()) {
+		if (!result.empty()) result += "|";
+		result += "CORES:" + cores_temp;
+	}
+	if (!nvme_temps.empty()) {
+		if (!result.empty()) result += "|";
+		result += "NVME:" + nvme_temps;
+	}
+	
+	return result.empty() ? "N/A" : result;
+}
+
+
 std::string set_fan_mode(const std::string &mode)
 {
     std::string previous_mode;
@@ -845,12 +965,29 @@ std::string set_fan_mode(const std::string &mode)
         previous_mode = requested_mode;
     }
     bool entering_manual = (mode == "MANUAL" && previous_mode != "MANUAL");
+    bool entering_profile = (mode == "PROFILE" && previous_mode != "PROFILE");
 
     if (mode == "BETTER_AUTO") {
         auto result = start_better_auto();
         if (result == "OK") {
             std::lock_guard<std::mutex> lock(mode_mutex);
             requested_mode = "BETTER_AUTO";
+        }
+        return result;
+    }
+
+    if (mode == "PROFILE") {
+        // PROFILE mode uses manual PWM control with profile data
+        stop_better_auto();
+        auto result = write_hw_fan_mode("MANUAL");
+        if (result == "OK") {
+            std::lock_guard<std::mutex> lock(mode_mutex);
+            requested_mode = "PROFILE";
+            if (entering_profile) {
+                std::lock_guard<std::mutex> speed_lock(fan_state_mutex);
+                last_fan1_speed.reset();
+                last_fan2_speed.reset();
+            }
         }
         return result;
     }
@@ -1016,4 +1153,55 @@ std::string set_fan_speed(const std::string &fan_num, const std::string &speed, 
         std::cerr << "Failed to execute set-fan-speed.sh for fan " << fan_num << ". Exit code: " << WEXITSTATUS(result) << std::endl;
         return "ERROR: Failed to set fan speed";
     }
+}
+
+std::string set_fan_profile(const std::string &profile_data)
+{
+    // Parse profile_data: "temp1 rpm1 temp2 rpm2 ..."
+    std::istringstream iss(profile_data);
+    std::vector<std::pair<int, int>> profile_points;
+    int temp, rpm;
+
+    while (iss >> temp >> rpm) {
+        // Validate temperature range (30-100°C)
+        if (temp < 30 || temp > 100) {
+            return "ERROR: Invalid temperature " + std::to_string(temp) + " (valid range: 30-100)";
+        }
+        
+        // Validate RPM: 0 (0 RPM mode) or minimum 600
+        if (rpm != 0 && rpm < 600) {
+            return "ERROR: Invalid RPM " + std::to_string(rpm) + " (must be 0 or >= 600)";
+        }
+        if (rpm > 6100) {
+            return "ERROR: Invalid RPM " + std::to_string(rpm) + " (maximum is 6100)";
+        }
+        
+        profile_points.push_back({temp, rpm});
+    }
+
+    if (profile_points.empty()) {
+        return "ERROR: No valid profile points provided";
+    }
+
+    // Store profile for later use (this is a simple implementation)
+    // In a real implementation, you might want to store this and use it for temperature-based fan control
+    std::cout << "Profile set with " << profile_points.size() << " points" << std::endl;
+    for (const auto &point : profile_points) {
+        std::cout << "  " << point.first << "°C -> " << point.second << " RPM" << std::endl;
+    }
+
+    // For now, apply the first point as a test
+    if (!profile_points.empty()) {
+        int rpm = profile_points[0].second;
+        // Apply to both fans with the same RPM
+        std::string result1 = set_fan_speed("1", std::to_string(rpm), false, true);
+        if (result1 != "OK") return result1;
+        
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        
+        std::string result2 = set_fan_speed("2", std::to_string(rpm), false, true);
+        if (result2 != "OK") return result2;
+    }
+
+    return "OK";
 }

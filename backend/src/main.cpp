@@ -12,7 +12,6 @@
 #include <cctype>
 
 #include "fan.hpp"
-#include "keyboard.hpp"
 
 #define SOCKET_DIR "/run/victus-control"
 #define SOCKET_PATH SOCKET_DIR "/victus_backend.sock"
@@ -140,29 +139,27 @@ void handle_command(const std::string &command_str, int client_socket)
 	{
 		response = get_fan_mode();
 	}
-	else if (command == "GET_KEYBOARD_COLOR")
+	else if (command == "GET_CPU_TEMP")
 	{
-		response = get_keyboard_color();
+		response = get_cpu_temp();
 	}
-	else if (command == "SET_KEYBOARD_COLOR")
+	else if (command == "GET_ALL_TEMPS")
 	{
-		std::string r, g, b;
-        ss >> r >> g >> b;
-        if (!r.empty() && !g.empty() && !b.empty()) {
-		    response = set_keyboard_color(r + " " + g + " " + b);
-        } else {
-            response = "ERROR: Invalid SET_KEYBOARD_COLOR command format";
-        }
+		response = get_all_temps();
 	}
-	else if (command == "GET_KBD_BRIGHTNESS")
+	else if (command == "SET_FAN_PROFILE")
 	{
-		response = get_keyboard_brightness();
-	}
-	else if (command == "SET_KBD_BRIGHTNESS")
-	{
-		std::string value;
-        ss >> value;
-		response = set_keyboard_brightness(value);
+		std::string remainder;
+		std::getline(ss, remainder);
+		remainder = trim(remainder);
+		if (remainder.empty()) {
+			response = "ERROR: Invalid SET_FAN_PROFILE command format";
+		} else {
+			response = set_fan_profile(remainder);
+			if (response == "OK") {
+				fan_mode_trigger("PROFILE");
+			}
+		}
 	}
 	else
 		response = "ERROR: Unknown command";
