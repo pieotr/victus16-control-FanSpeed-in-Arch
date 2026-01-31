@@ -1,6 +1,10 @@
 TLDR a fork thats complete overhaul of a victus controll that works for victus 16-R and doesent break the keyboard lighting  (which original did, i culdnt even turn on the backlight at all due to broken file)   the keyboard BG can be controlled via KDE build in options in the same place as the screen brightness. the fan profiles are much improved and allowing for user changes to them. The fan speed is based on the cpu temps and it auto updates. there is an option to make your own progfile as well. Also it allows for 0rpm mode. Also allows manual fan speed input.  
 
 
+Values in betwen temp points are interpolated. 
+
+The fan speed 2 needs a moment to catch up after fan 1 changes (not sure why but thats not imporatnt isue i guess)
+
 # Victus-Control - Complete Documentation
 
 A comprehensive fan control solution for HP Victus/Omen laptops on Linux, featuring dynamic temperature monitoring, customizable fan profiles, and low-resource background operation.
@@ -22,7 +26,7 @@ A comprehensive fan control solution for HP Victus/Omen laptops on Linux, featur
 
 ### ✅ Core Capabilities
 - **Better Auto Mode**: Intelligent fan curve that adapts to CPU temperature and load
-- **Manual Control**: Direct RPM input (0 or 600-6100 RPM per fan) 
+- **Manual Control**: Direct RPM input (0 or 1500-6100 RPM per fan) 
 - **Custom Profiles**: Save up to 10 temperature/RPM points for different scenarios
 - **Real-Time Temperatures**: CPU package temp + individual core temps + NVMe temps
 - **Persistent Settings**: Automatically save and load user preferences
@@ -130,7 +134,7 @@ sensors  # Should show CPU Package, Core, and NVMe temps
 |------|---------|
 | **AUTO** | Stock firmware default (not recommended) |
 | **Better Auto** | Intelligent curve (recommended for daily use) |
-| **MANUAL** | Direct RPM input for precise control |
+| **MANUAL** | Direct RPM input for precise control (0 or 1500-6100 RPM) |
 | **PROFILE** | Custom temperature/RPM curves |
 | **MAX** | Maximum speed (max cooling, max noise) |
 
@@ -157,9 +161,11 @@ Fan 2 Speed: 3100 RPM
 ### Manual Mode
 
 1. Select **MANUAL** from mode dropdown
-2. Enter RPM value (0 for stop, 600-6100 for running)
-3. Click **Apply RPM**      wait a little for both fans to be set
+2. Enter RPM value (0 for stop, 1500-6100 for running)
+3. Click **Apply RPM** — wait a little for both fans to be set
 4. Fan maintains setting even after system sleep/resume
+
+**Note on Minimum RPM**: The minimum non-zero RPM is **1500** due to fan motor specifications. These fans require a minimum voltage to overcome static friction and start spinning. Below 1500 RPM, the fans may not respond or may stall. This limit ensures reliable fan operation. Use **0 RPM mode** if you want to stop the fans completely.
 
 ### Profile Mode
 
@@ -501,12 +507,84 @@ echo "GET_FAN_MODE" | nc -U /run/victus-control/victus-backend.sock
 
 **Silent profile** (minimal noise):
 ```
-40°C → 1000 RPM
+40°C → 1500 RPM
 60°C → 2500 RPM
 80°C → 3500 RPM
 ```
 
+---
 
+## Modifying Code and Rebuilding
+
+If you want to customize the code (fan profiles, RPM ranges, colors, etc.), here's how to rebuild and install:
+
+### Prerequisites
+Make sure you have the build dependencies installed:
+```bash
+sudo pacman -S meson ninja gtk4 git dkms linux-headers lm_sensors
+```
+
+### Build Steps
+
+1. **Navigate to the project directory:**
+   ```bash
+   cd ~/Downloads/Victus-FanControl/victus-control
+   ```
+
+2. **Clean previous builds (optional but recommended):**
+   ```bash
+   rm -rf build
+   ```
+
+3. **Configure and build:**
+   ```bash
+   meson setup build --prefix=/usr
+   meson compile -C build
+   ```
+
+4. **Install the updated binaries:**
+   ```bash
+   sudo meson install -C build
+   ```
+
+5. **Restart the backend service:**
+   ```bash
+   sudo systemctl restart victus-backend.service
+   ```
+
+### Common Customizations
+
+**To modify fan profiles:**
+- Edit `backend/src/fan_profile_config.hpp`
+- Profiles define temperature points and corresponding RPM targets
+- Follow the existing format and rebuild using the steps above
+
+**To change minimum RPM:**
+- Frontend: `frontend/src/fan.cpp` — `const int MIN_RPM_NONZERO = 1500;`
+- Backend: `backend/src/fan.cpp` — `static constexpr int kBetterAutoMinRpm = 1500;` and validation `if (rpm != 0 && rpm < 1500)`
+- Update this value consistently in all three places
+- Rebuild after changes
+
+**To modify temperature ranges:**
+- Edit profile points in `backend/src/fan_profile_config.hpp`
+- Temperature range: 0–100°C (validated in backend)
+- Rebuild and reinstall
+
+### Troubleshooting Rebuild
+
+**Compilation errors:**
+- Ensure all dependencies are installed: `pacman -S meson ninja gtk4 dkms linux-headers`
+- Check file permissions: `ls -la frontend/src/`
+- Look for missing includes or typos
+
+**Build cache issues:**
+- Remove build directory and reconfigure: `rm -rf build && meson setup build --prefix=/usr`
+
+**Permission denied during install:**
+- Use `sudo meson install` if non-root installation fails
+- Verify sudoers rules: `sudo cat /etc/sudoers.d/victus-control`
+
+---
 
 **Last Updated**: January 31, 2026
-**Version**: 1.1.2 (Settings + Optimization)
+**Version**: 1.1.3 (Min RPM Documentation + Rebuild Guide)

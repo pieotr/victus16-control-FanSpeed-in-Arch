@@ -9,7 +9,7 @@
 #include <sstream>
 
 // Constants for manual fan control
-const int MIN_RPM_NONZERO = 600;  // Minimum non-zero RPM
+const int MIN_RPM_NONZERO = 1500;  // Minimum non-zero RPM
 const int FAN1_MAX_RPM = 5800;
 const int FAN2_MAX_RPM = 6100;
 const int RPM_STEPS = 8;
@@ -47,7 +47,7 @@ VictusFanControl::VictusFanControl(std::shared_ptr<VictusSocketClient> client) :
 
     manual_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     
-    GtkWidget *rpm_label = gtk_label_new("RPM (0 or 600-6100):");
+    GtkWidget *rpm_label = gtk_label_new("RPM (0 or 1500-6100):");
     gtk_box_append(GTK_BOX(manual_box), rpm_label);
     
     rpm_input = gtk_spin_button_new_with_range(MIN_RPM_INPUT, MAX_RPM_INPUT, 50);

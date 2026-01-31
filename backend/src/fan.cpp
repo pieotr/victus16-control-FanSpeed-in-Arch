@@ -21,6 +21,7 @@
 
 #include "fan.hpp"
 #include "util.hpp"
+#include "fan_profile_config.hpp"
 
 static std::atomic<int> fan_thread_generation(0);
 static std::atomic<bool> is_reapplying(false);
@@ -56,7 +57,7 @@ struct CpuSampleTimes {
 static std::mutex cpu_usage_mutex;
 static std::optional<CpuSampleTimes> previous_cpu_times;
 
-static constexpr int kBetterAutoMinRpm = 2600;
+static constexpr int kBetterAutoMinRpm = 1500;
 static constexpr std::array<int, 2> kBetterAutoMaxFallback = {5800, 6100};
 static constexpr int kBetterAutoSteps = 8;
 static constexpr std::chrono::seconds kBetterAutoTick{2};
@@ -429,8 +430,41 @@ static int level_from_thresholds(double value, const std::array<double, 7> &thre
     return std::clamp(level, 1, kBetterAutoSteps);
 }
 
+static int rpm_for_temperature_for_fan(double temp_c, size_t fan_index)
+{
+    // Select the appropriate profile based on fan index
+    const auto &profile = (fan_index == 0) ? FAN1_BETTER_AUTO_PROFILE : FAN2_BETTER_AUTO_PROFILE;
+    
+    // Handle temperature below lowest profile point
+    if (temp_c <= profile[0].first) {
+        return profile[0].second;
+    }
+    
+    // Handle temperature above highest profile point
+    if (temp_c >= profile[profile.size() - 1].first) {
+        return profile[profile.size() - 1].second;
+    }
+    
+    // Find the two profile points that bracket the current temperature
+    for (size_t i = 0; i < profile.size() - 1; ++i) {
+        if (temp_c >= profile[i].first && temp_c <= profile[i + 1].first) {
+            // Linear interpolation between the two points
+            double temp_diff = profile[i + 1].first - profile[i].first;
+            double rpm_diff = profile[i + 1].second - profile[i].second;
+            double ratio = (temp_c - profile[i].first) / temp_diff;
+            int interpolated_rpm = profile[i].second + static_cast<int>(ratio * rpm_diff);
+            return interpolated_rpm;
+        }
+    }
+    
+    // Fallback (should not reach here)
+    return profile[profile.size() - 1].second;
+}
+
 static int rpm_for_level_for_fan(int level, size_t fan_index)
 {
+    // This function is kept for compatibility but now unused
+    // RPM is determined directly from temperature via rpm_for_temperature_for_fan
     level = std::clamp(level, 1, kBetterAutoSteps);
     int max_rpm = fan_max_for_index(fan_index);
     if (kBetterAutoSteps <= 1) {
@@ -447,6 +481,28 @@ static int rpm_for_level_for_fan(int level, size_t fan_index)
 static std::array<int, 2> rpm_for_level(int level)
 {
     return {rpm_for_level_for_fan(level, 0), rpm_for_level_for_fan(level, 1)};
+}
+
+static std::array<int, 2> rpm_for_temperature(double temp_c)
+{
+    return {rpm_for_temperature_for_fan(temp_c, 0), rpm_for_temperature_for_fan(temp_c, 1)};
+}
+
+static double get_hottest_temperature(const ThermalSnapshot &snapshot, double previous_temp)
+{
+    double hottest = 0.0;
+    bool have_temp = false;
+    
+    if (snapshot.cpu_temp_c) {
+        hottest = std::max(hottest, *snapshot.cpu_temp_c);
+        have_temp = true;
+    }
+    if (snapshot.gpu_temp_c) {
+        hottest = std::max(hottest, *snapshot.gpu_temp_c);
+        have_temp = true;
+    }
+    
+    return have_temp ? hottest : previous_temp;
 }
 
 static int level_from_snapshot(const ThermalSnapshot &snapshot, int previous_level)
@@ -595,27 +651,14 @@ static std::string write_hw_fan_mode(const std::string &mode)
 static void better_auto_worker()
 {
     std::cout << "better-auto: control loop started" << std::endl;
-    int current_level = 3;
-    int sensor_level = 3;
+    double current_temp = 50.0;
     auto last_apply = std::chrono::steady_clock::time_point::min();
     better_auto_last_manual_assert = std::chrono::steady_clock::time_point::min();
-    auto cooldown_until = std::chrono::steady_clock::time_point::min();
-    int cooldown_level = 0;
 
     while (better_auto_running.load(std::memory_order_acquire)) {
         ThermalSnapshot snapshot = collect_snapshot();
-        sensor_level = level_from_snapshot(snapshot, sensor_level);
-        int target_level = sensor_level;
+        double sensor_temp = get_hottest_temperature(snapshot, current_temp);
         auto now = std::chrono::steady_clock::now();
-
-        if (cooldown_level > 0 && now >= cooldown_until) {
-            cooldown_level = 0;
-            cooldown_until = std::chrono::steady_clock::time_point::min();
-        }
-
-        if (cooldown_level > 0 && target_level < cooldown_level) {
-            target_level = cooldown_level;
-        }
 
         bool need_mode_refresh = (better_auto_last_manual_assert == std::chrono::steady_clock::time_point::min()) ||
                                  (now - better_auto_last_manual_assert >= std::chrono::seconds(80));
@@ -627,18 +670,17 @@ static void better_auto_worker()
             better_auto_last_manual_assert = now;
         }
 
-        if (target_level < current_level) {
-            target_level = std::max(target_level, current_level - 1);
-        }
-
-        bool need_apply = (target_level != current_level) ||
+        // Only apply if temperature changed significantly or reapply timeout
+        bool need_apply = (std::abs(sensor_temp - current_temp) >= 1.0) ||
                           (last_apply == std::chrono::steady_clock::time_point::min()) ||
                           (now - last_apply >= kBetterAutoReapply);
 
         if (need_apply) {
-            auto rpms = rpm_for_level(target_level);
+            auto rpms = rpm_for_temperature(sensor_temp);
             std::string rpm_str_fan1 = std::to_string(rpms[0]);
             std::string rpm_str_fan2 = std::to_string(rpms[1]);
+
+            std::cout << "better-auto: setting RPM at " << sensor_temp << "°C -> Fan1: " << rpms[0] << " RPM, Fan2: " << rpms[1] << " RPM" << std::endl;
 
             auto result1 = set_fan_speed("1", rpm_str_fan1, false, true);
             if (result1 != "OK") {
@@ -662,13 +704,8 @@ static void better_auto_worker()
                 std::cerr << "better-auto: failed to set fan 2 speed: " << result2 << std::endl;
             }
 
-            current_level = target_level;
+            current_temp = sensor_temp;
             last_apply = now;
-        }
-
-        if (sensor_level >= kBetterAutoCooldownLevel) {
-            cooldown_level = std::max(cooldown_level, current_level);
-            cooldown_until = now + kBetterAutoCooldown;
         }
 
         const int tick_seconds = static_cast<int>(kBetterAutoTick.count());
@@ -1168,9 +1205,9 @@ std::string set_fan_profile(const std::string &profile_data)
             return "ERROR: Invalid temperature " + std::to_string(temp) + " (valid range: 30-100)";
         }
         
-        // Validate RPM: 0 (0 RPM mode) or minimum 600
-        if (rpm != 0 && rpm < 600) {
-            return "ERROR: Invalid RPM " + std::to_string(rpm) + " (must be 0 or >= 600)";
+        // Validate RPM: 0 (0 RPM mode) or minimum 1500
+        if (rpm != 0 && rpm < 1500) {
+            return "ERROR: Invalid RPM " + std::to_string(rpm) + " (must be 0 or >= 1500)";
         }
         if (rpm > 6100) {
             return "ERROR: Invalid RPM " + std::to_string(rpm) + " (maximum is 6100)";
