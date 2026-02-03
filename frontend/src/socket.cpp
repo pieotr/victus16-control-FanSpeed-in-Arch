@@ -191,9 +191,7 @@ void VictusSocketClient::process_queued_command(std::unique_ptr<PendingCommand> 
 			}
 			full_command += pending->command;
 		}
-		std::cout << "Sending command: " << full_command << std::endl;
 		auto result = send_command(full_command);
-		std::cout << "Received response: " << result << std::endl;
 		pending->result.set_value(result);
 	} else {
 		pending->result.set_value("ERROR: Unknown command type");

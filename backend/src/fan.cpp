@@ -13,11 +13,14 @@
 #include <cctype>
 #include <array>
 #include <vector>
+#include <set>
 #include <cstring>
 #include <cerrno>
 #include <algorithm>
 #include <exception>
 #include <cmath>
+#include <sensors/sensors.h>
+#include <sensors/error.h>
 
 #include "fan.hpp"
 #include "util.hpp"
@@ -887,23 +890,42 @@ std::string get_fan_mode()
 
 std::string get_cpu_temp()
 {
-	// Try to read CPU temperature from lm-sensors (sensors command)
-	FILE *sensors_pipe = popen("sensors -A -u 2>/dev/null | grep -m1 'temp.*_input' | awk '{print $2}' | cut -d. -f1", "r");
-	if (sensors_pipe) {
-		char buffer[32];
-		if (fgets(buffer, sizeof(buffer), sensors_pipe)) {
-			pclose(sensors_pipe);
-			char *end;
-			long temp = strtol(buffer, &end, 10);
-			if (end != buffer && temp >= 0 && temp <= 150) {
-				std::lock_guard<std::mutex> lock(cpu_temp_cache_mutex);
-				last_cpu_temp_c = static_cast<double>(temp);
-				return std::to_string(temp);
+	// Initialize sensors library (safe to call multiple times)
+	static std::once_flag sensors_init_flag;
+	std::call_once(sensors_init_flag, []() {
+		sensors_init(nullptr);
+	});
+
+	// Try to read CPU package temperature from libsensors
+	const sensors_chip_name *chip;
+	int chip_nr = 0;
+
+	while ((chip = sensors_get_detected_chips(nullptr, &chip_nr)) != nullptr) {
+		const sensors_feature *feature;
+		int feature_nr = 0;
+
+		while ((feature = sensors_get_features(chip, &feature_nr)) != nullptr) {
+			// Look for package temperature (coretemp is common for Intel CPUs)
+			if (feature->type == SENSORS_FEATURE_TEMP) {
+				const sensors_subfeature *subfeature;
+				int subfeature_nr = 0;
+
+				while ((subfeature = sensors_get_all_subfeatures(chip, feature, &subfeature_nr)) != nullptr) {
+					if (subfeature->type == SENSORS_SUBFEATURE_TEMP_INPUT) {
+						double temp_val;
+						if (sensors_get_value(chip, subfeature->number, &temp_val) == 0) {
+							if (temp_val >= 0 && temp_val <= 150) {
+								std::lock_guard<std::mutex> lock(cpu_temp_cache_mutex);
+								last_cpu_temp_c = temp_val;
+								return std::to_string(static_cast<int>(temp_val));
+							}
+						}
+					}
+				}
 			}
 		}
-		pclose(sensors_pipe);
 	}
-	
+
 	// Fallback to cached temperature
 	std::lock_guard<std::mutex> lock(cpu_temp_cache_mutex);
 	if (last_cpu_temp_c) {
@@ -914,68 +936,67 @@ std::string get_cpu_temp()
 
 std::string get_all_temps()
 {
-	// Get CPU temperatures from lm-sensors
+	// Initialize sensors library (safe to call multiple times)
+	static std::once_flag sensors_init_flag;
+	std::call_once(sensors_init_flag, []() {
+		sensors_init(nullptr);
+	});
+
+	// Get CPU temperatures from libsensors
 	// Returns: "PKG:48|CORES:40,39,43,45,43,45,45,45,45,45|NVME:37,36"
 	std::string pkg_temp;
 	std::string cores_temp;
 	std::string nvme_temps;
+	std::set<uintptr_t> nvme_chips_read;
+
+	const sensors_chip_name *chip;
+	int chip_nr = 0;
 	
-	FILE *sensors_pipe = popen("sensors -A 2>/dev/null", "r");
-	if (sensors_pipe) {
-		char buffer[256];
-		bool found_package = false;
-		
-		while (fgets(buffer, sizeof(buffer), sensors_pipe)) {
-			std::string line(buffer);
-			
-			// Look for CPU package temperature
-			if (!found_package && line.find("Package id") != std::string::npos) {
-				size_t temp_pos = line.find("+");
-				if (temp_pos != std::string::npos) {
-					size_t end_pos = line.find("°C", temp_pos);
-					if (end_pos != std::string::npos) {
-						std::string temp_str = line.substr(temp_pos + 1, end_pos - temp_pos - 1);
-						double temp_val = std::stod(temp_str);
-						int temp_int = static_cast<int>(temp_val);
-						pkg_temp = std::to_string(temp_int);
-						found_package = true;
-					}
+	while ((chip = sensors_get_detected_chips(nullptr, &chip_nr)) != nullptr) {
+		const char *prefix = chip->prefix;
+		if (!prefix) continue;
+
+		const sensors_feature *feature;
+		int feature_nr = 0;
+
+		while ((feature = sensors_get_features(chip, &feature_nr)) != nullptr) {
+			if (feature->type == SENSORS_FEATURE_TEMP) {
+				const bool is_coretemp = (prefix[0] == 'c' && prefix[1] == 'o' && prefix[2] == 'r' && prefix[3] == 'e');
+				const bool is_nvme = (prefix[0] == 'n' && prefix[1] == 'v' && prefix[2] == 'm' && prefix[3] == 'e');
+
+				if (is_nvme && nvme_chips_read.count((uintptr_t)chip) > 0) {
+					continue;
 				}
-			}
-			
-			// Look for CPU Core temperatures
-			if (line.find("Core") != std::string::npos && line.find(":") != std::string::npos) {
-				size_t temp_pos = line.find("+");
-				if (temp_pos != std::string::npos) {
-					size_t end_pos = line.find("°C", temp_pos);
-					if (end_pos != std::string::npos) {
-						std::string temp_str = line.substr(temp_pos + 1, end_pos - temp_pos - 1);
-						double temp_val = std::stod(temp_str);
-						int temp_int = static_cast<int>(temp_val);
-						if (!cores_temp.empty()) cores_temp += ",";
-						cores_temp += std::to_string(temp_int);
-					}
-				}
-			}
-			
-			// Look for ALL NVMe Composite temperatures
-			if (line.find("Composite:") != std::string::npos) {
-				size_t temp_pos = line.find("+");
-				if (temp_pos != std::string::npos) {
-					size_t end_pos = line.find("°C", temp_pos);
-					if (end_pos != std::string::npos) {
-						std::string temp_str = line.substr(temp_pos + 1, end_pos - temp_pos - 1);
-						double temp_val = std::stod(temp_str);
-						int temp_int = static_cast<int>(temp_val);
-						if (!nvme_temps.empty()) nvme_temps += ",";
-						nvme_temps += std::to_string(temp_int);
+
+				const sensors_subfeature *subfeature;
+				int subfeature_nr = 0;
+
+				while ((subfeature = sensors_get_all_subfeatures(chip, feature, &subfeature_nr)) != nullptr) {
+					if (subfeature->type == SENSORS_SUBFEATURE_TEMP_INPUT) {
+						double temp_val;
+						if (sensors_get_value(chip, subfeature->number, &temp_val) == 0 && temp_val >= 0 && temp_val <= 150) {
+							int temp_int = static_cast<int>(temp_val);
+
+							if (is_coretemp) {
+								if (feature_nr == 1 && pkg_temp.empty()) {
+									pkg_temp = std::to_string(temp_int);
+								} else if (feature_nr > 1) {
+									if (!cores_temp.empty()) cores_temp += ",";
+									cores_temp += std::to_string(temp_int);
+								}
+							} else if (is_nvme) {
+								if (!nvme_temps.empty()) nvme_temps += ",";
+								nvme_temps += std::to_string(temp_int);
+								nvme_chips_read.insert((uintptr_t)chip);
+								break;
+							}
+						}
 					}
 				}
 			}
 		}
-		pclose(sensors_pipe);
 	}
-	
+
 	// Build result string with labels
 	std::string result;
 	if (!pkg_temp.empty()) {
@@ -989,7 +1010,8 @@ std::string get_all_temps()
 		if (!result.empty()) result += "|";
 		result += "NVME:" + nvme_temps;
 	}
-	
+
+	std::cout << "DEBUG: get_all_temps() returning: " << (result.empty() ? "N/A" : result) << std::endl;
 	return result.empty() ? "N/A" : result;
 }
 
@@ -1220,8 +1242,7 @@ std::string set_fan_profile(const std::string &profile_data)
         return "ERROR: No valid profile points provided";
     }
 
-    // Store profile for later use (this is a simple implementation)
-    // In a real implementation, you might want to store this and use it for temperature-based fan control
+    // Store profile for manual application
     std::cout << "Profile set with " << profile_points.size() << " points" << std::endl;
     for (const auto &point : profile_points) {
         std::cout << "  " << point.first << "°C -> " << point.second << " RPM" << std::endl;
@@ -1234,7 +1255,7 @@ std::string set_fan_profile(const std::string &profile_data)
         std::string result1 = set_fan_speed("1", std::to_string(rpm), false, true);
         if (result1 != "OK") return result1;
         
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        std::this_thread::sleep_for(std::chrono::seconds(2));
         
         std::string result2 = set_fan_speed("2", std::to_string(rpm), false, true);
         if (result2 != "OK") return result2;

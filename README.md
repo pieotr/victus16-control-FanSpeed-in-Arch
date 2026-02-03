@@ -1,9 +1,9 @@
-TLDR a fork thats complete overhaul of a victus controll that works for victus 16-R and doesent break the keyboard lighting  (which original did, i culdnt even turn on the backlight at all due to broken file)   the keyboard BG can be controlled via KDE build in options in the same place as the screen brightness. the fan profiles are much improved and allowing for user changes to them. The fan speed is based on the cpu temps and it auto updates. there is an option to make your own progfile as well. Also it allows for 0rpm mode. Also allows manual fan speed input.  
+TLDR: A fork that's a complete overhaul of Victus Control, which works for Victus 16-R and doesn't break the keyboard lighting (which the original did—I couldn't even turn on the backlight at all due to broken files). The keyboard backlight can be controlled via KDE built-in options in the same place as the screen brightness. The fan profiles are much improved and allow for user changes. The fan speed is based on CPU temps and auto-updates. There is an option to create your own profile as well. It also allows 0 RPM mode and manual fan speed input.  
 
 
-Values in betwen temp points are interpolated. 
+Values between temperature points are interpolated. 
 
-The fan speed 2 needs a moment to catch up after fan 1 changes (not sure why but thats not imporatnt isue i guess)
+Fan 2 speed needs a moment to catch up after Fan 1 changes (not sure why, but that's not an important issue).
 
 # Victus-Control - Complete Documentation
 
@@ -264,7 +264,7 @@ nano ~/.config/victus-control/settings.conf
 # App reloads on restart
 ```
 
-### Profile Configuration (Advanced)  -- you propably want to do it when you find your prefered curve
+### Profile Configuration (Advanced) — You probably want to do this when you find your preferred curve
 Edit hardcoded "Better Auto" profiles:
 ```bash
 nano backend/src/fan_profile_config.hpp
@@ -391,7 +391,7 @@ update_interval_sec=1   # Most responsive
 
 ### Reducing System Impact
 
-1. **Increase update interval** if monitoring overhead is concerns
+1. **Increase update interval** if monitoring overhead is a concern
 2. **Disable UI** after launch (runs in background)
 3. **Use systemd.service only** if GUI not needed:
    ```bash
@@ -403,7 +403,7 @@ update_interval_sec=1   # Most responsive
 
 ## Troubleshooting
 
-### Common Issues you shuld never encounter... but in case -
+### Common Issues you should never encounter... but just in case
 
 #### 1. **"CPU: N/A | NVMe: N/A"** (no temperatures)
 **Cause**: lm-sensors not initialized

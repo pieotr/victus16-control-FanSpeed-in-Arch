@@ -1,6 +1,12 @@
 executable('victus-backend',
   sources: ['src/fan.cpp', 'src/fan.hpp', 'src/main.cpp', 'src/util.cpp', 'src/util.hpp'],
-  dependencies: [dependency('threads')],
+  dependencies: [
+    dependency('threads'),
+    declare_dependency(
+      link_args: ['-lsensors'],
+      include_directories: include_directories('/usr/include')
+    )
+  ],
   install: true,
   install_dir: get_option('bindir'))
 

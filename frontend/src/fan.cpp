@@ -8,6 +8,37 @@
 #include <algorithm>
 #include <sstream>
 
+// Helper structs for async UI updates
+struct UpdateStateData {
+    std::string fan_mode;
+    GtkWidget *mode_selector;
+    GtkWidget *manual_box;
+    GtkWidget *profile_box;
+    GtkWidget *state_label;
+};
+
+struct UpdateSpeedData {
+    std::string fan1_speed;
+    std::string fan2_speed;
+    GtkWidget *fan1_speed_label;
+    GtkWidget *fan2_speed_label;
+};
+
+struct ModeChangeData {
+    std::string mode_str;
+    GtkWidget *manual_box;
+    GtkWidget *profile_box;
+    VictusFanControl *self;
+};
+
+struct TempData {
+    std::string pkg_temp;
+    std::string nvme_temps;
+    std::string cores_temps;
+    GtkWidget *all_temps_label;
+    GtkWidget *cpu_temp_label;
+};
+
 // Constants for manual fan control
 const int MIN_RPM_NONZERO = 1500;  // Minimum non-zero RPM
 const int FAN1_MAX_RPM = 5800;
@@ -198,51 +229,83 @@ VictusFanControl::~VictusFanControl()
 
 void VictusFanControl::update_ui_from_system_state()
 {
-    auto response = socket_client->send_command_async(GET_FAN_MODE);
-    std::string fan_mode = response.get();
+    // Use a background thread to wait for the response without blocking the UI
+    auto client = socket_client;
+    auto mode_selector_ptr = mode_selector;
+    auto manual_box_ptr = manual_box;
+    auto profile_box_ptr = profile_box;
+    auto state_label_ptr = state_label;
+    
+    std::thread([client, mode_selector_ptr, manual_box_ptr, profile_box_ptr, state_label_ptr]() {
+        auto response = client->send_command_async(GET_FAN_MODE);
+        std::string fan_mode = response.get();
 
-    if (fan_mode.find("ERROR") != std::string::npos) {
-        fan_mode = "AUTO"; // Default to AUTO on error
-        std::cerr << "Failed to get fan mode, defaulting to AUTO." << std::endl;
-    }
+        if (fan_mode.find("ERROR") != std::string::npos) {
+            fan_mode = "AUTO"; // Default to AUTO on error
+            std::cerr << "Failed to get fan mode, defaulting to AUTO." << std::endl;
+        }
 
-    gtk_label_set_text(GTK_LABEL(state_label), ("Current State: " + fan_mode).c_str());
+        // Schedule UI update on main thread
+        g_idle_add([](gpointer user_data) -> gboolean {
+            UpdateStateData *data = static_cast<UpdateStateData*>(user_data);
 
-    if (fan_mode == "MANUAL") {
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "MANUAL");
-        gtk_widget_set_sensitive(manual_box, TRUE);
-        gtk_widget_set_sensitive(profile_box, FALSE);
-    } else if (fan_mode == "PROFILE") {
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "PROFILE");
-        gtk_widget_set_sensitive(manual_box, FALSE);
-        gtk_widget_set_sensitive(profile_box, TRUE);
-    } else if (fan_mode == "BETTER_AUTO") {
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "BETTER_AUTO");
-        gtk_widget_set_sensitive(manual_box, FALSE);
-        gtk_widget_set_sensitive(profile_box, FALSE);
-    } else if (fan_mode == "MAX") {
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "MAX");
-        gtk_widget_set_sensitive(manual_box, FALSE);
-        gtk_widget_set_sensitive(profile_box, FALSE);
-    } else { // AUTO
-        gtk_combo_box_set_active_id(GTK_COMBO_BOX(mode_selector), "AUTO");
-        gtk_widget_set_sensitive(manual_box, FALSE);
-        gtk_widget_set_sensitive(profile_box, FALSE);
-    }
+            gtk_label_set_text(GTK_LABEL(data->state_label), ("Current State: " + data->fan_mode).c_str());
+
+            if (data->fan_mode == "MANUAL") {
+                gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mode_selector), "MANUAL");
+                gtk_widget_set_sensitive(data->manual_box, TRUE);
+                gtk_widget_set_sensitive(data->profile_box, FALSE);
+            } else if (data->fan_mode == "PROFILE") {
+                gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mode_selector), "PROFILE");
+                gtk_widget_set_sensitive(data->manual_box, FALSE);
+                gtk_widget_set_sensitive(data->profile_box, TRUE);
+            } else if (data->fan_mode == "BETTER_AUTO") {
+                gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mode_selector), "BETTER_AUTO");
+                gtk_widget_set_sensitive(data->manual_box, FALSE);
+                gtk_widget_set_sensitive(data->profile_box, FALSE);
+            } else if (data->fan_mode == "MAX") {
+                gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mode_selector), "MAX");
+                gtk_widget_set_sensitive(data->manual_box, FALSE);
+                gtk_widget_set_sensitive(data->profile_box, FALSE);
+            } else { // AUTO
+                gtk_combo_box_set_active_id(GTK_COMBO_BOX(data->mode_selector), "AUTO");
+                gtk_widget_set_sensitive(data->manual_box, FALSE);
+                gtk_widget_set_sensitive(data->profile_box, FALSE);
+            }
+
+            delete data;
+            return G_SOURCE_REMOVE;
+        }, new UpdateStateData{fan_mode, mode_selector_ptr, manual_box_ptr, profile_box_ptr, state_label_ptr});
+    }).detach();
 }
 
 void VictusFanControl::update_fan_speeds()
 {
-    auto response2 = socket_client->send_command_async(GET_FAN_SPEED, "1");
-    std::string fan1_speed = response2.get();
-    if (fan1_speed.find("ERROR") != std::string::npos) fan1_speed = "N/A";
+    // Use background threads to wait for responses without blocking the UI
+    auto client = socket_client;
+    auto fan1_speed_label_ptr = fan1_speed_label;
+    auto fan2_speed_label_ptr = fan2_speed_label;
+    
+    std::thread([client, fan1_speed_label_ptr, fan2_speed_label_ptr]() {
+        auto response2 = client->send_command_async(GET_FAN_SPEED, "1");
+        std::string fan1_speed = response2.get();
+        if (fan1_speed.find("ERROR") != std::string::npos) fan1_speed = "N/A";
 
-    auto response3 = socket_client->send_command_async(GET_FAN_SPEED, "2");
-    std::string fan2_speed = response3.get();
-    if (fan2_speed.find("ERROR") != std::string::npos) fan2_speed = "N/A";
+        auto response3 = client->send_command_async(GET_FAN_SPEED, "2");
+        std::string fan2_speed = response3.get();
+        if (fan2_speed.find("ERROR") != std::string::npos) fan2_speed = "N/A";
 
-    gtk_label_set_text(GTK_LABEL(fan1_speed_label), ("Fan 1 Speed: " + fan1_speed + " RPM").c_str());
-    gtk_label_set_text(GTK_LABEL(fan2_speed_label), ("Fan 2 Speed: " + fan2_speed + " RPM").c_str());
+        // Schedule UI update on main thread
+        g_idle_add([](gpointer user_data) -> gboolean {
+            UpdateSpeedData *data = static_cast<UpdateSpeedData*>(user_data);
+
+            gtk_label_set_text(GTK_LABEL(data->fan1_speed_label), ("Fan 1 Speed: " + data->fan1_speed + " RPM").c_str());
+            gtk_label_set_text(GTK_LABEL(data->fan2_speed_label), ("Fan 2 Speed: " + data->fan2_speed + " RPM").c_str());
+
+            delete data;
+            return G_SOURCE_REMOVE;
+        }, new UpdateSpeedData{fan1_speed, fan2_speed, fan1_speed_label_ptr, fan2_speed_label_ptr});
+    }).detach();
 }
 
 void VictusFanControl::set_fan_rpm(int rpm)
@@ -353,10 +416,16 @@ void VictusFanControl::apply_profile()
                       std::to_string(profile_points[i].rpm);
     }
 
-    auto result = socket_client->send_command_async(SET_FAN_PROFILE, profile_str).get();
-    if (result != "OK") {
-        std::cerr << "Failed to apply profile: " << result << std::endl;
-    }
+    // Send profile in background thread without blocking the UI
+    auto client = socket_client;
+    std::thread([client, profile_str]() {
+        auto result_future = client->send_command_async(SET_FAN_PROFILE, profile_str);
+        std::string result = result_future.get();
+        
+        if (result != "OK") {
+            std::cerr << "Failed to apply profile: " << result << std::endl;
+        }
+    }).detach();
 }
 
 void VictusFanControl::on_mode_changed(GtkComboBox *widget, gpointer data)
@@ -367,28 +436,44 @@ void VictusFanControl::on_mode_changed(GtkComboBox *widget, gpointer data)
     if (mode_id) {
         std::string mode_str(mode_id);
         
-        // Send the mode command and wait for it to complete.
-        auto result = self->socket_client->send_command_async(SET_FAN_MODE, mode_str).get();
-
-        if (result == "OK") {
-            // Handle different modes
-            if (mode_str == "MANUAL") {
-                gtk_widget_set_sensitive(self->manual_box, TRUE);
-                gtk_widget_set_sensitive(self->profile_box, FALSE);
-            } else if (mode_str == "PROFILE") {
-                gtk_widget_set_sensitive(self->manual_box, FALSE);
-                gtk_widget_set_sensitive(self->profile_box, TRUE);
-                self->apply_profile();
-            } else {
-                gtk_widget_set_sensitive(self->manual_box, FALSE);
-                gtk_widget_set_sensitive(self->profile_box, FALSE);
-            }
-        } else {
-            std::cerr << "Failed to set fan mode: " << result << std::endl;
-        }
+        // Send the mode command in a background thread without blocking the UI
+        auto client = self->socket_client;
+        auto manual_box_ptr = self->manual_box;
+        auto profile_box_ptr = self->profile_box;
+        auto this_ptr = self;
         
-        // After all commands are sent, update the UI to reflect the final state.
-        self->update_ui_from_system_state();
+        std::thread([client, mode_str, manual_box_ptr, profile_box_ptr, this_ptr]() {
+            auto result_future = client->send_command_async(SET_FAN_MODE, mode_str);
+            std::string result = result_future.get();
+
+            if (result == "OK") {
+                // Schedule UI update on main thread
+                g_idle_add([](gpointer user_data) -> gboolean {
+                    ModeChangeData *data = static_cast<ModeChangeData*>(user_data);
+
+                    // Handle different modes
+                    if (data->mode_str == "MANUAL") {
+                        gtk_widget_set_sensitive(data->manual_box, TRUE);
+                        gtk_widget_set_sensitive(data->profile_box, FALSE);
+                    } else if (data->mode_str == "PROFILE") {
+                        gtk_widget_set_sensitive(data->manual_box, FALSE);
+                        gtk_widget_set_sensitive(data->profile_box, TRUE);
+                        data->self->apply_profile();
+                    } else {
+                        gtk_widget_set_sensitive(data->manual_box, FALSE);
+                        gtk_widget_set_sensitive(data->profile_box, FALSE);
+                    }
+                    
+                    // After all commands are sent, update the UI to reflect the final state.
+                    data->self->update_ui_from_system_state();
+
+                    delete data;
+                    return G_SOURCE_REMOVE;
+                }, new ModeChangeData{mode_str, manual_box_ptr, profile_box_ptr, this_ptr});
+            } else {
+                std::cerr << "Failed to set fan mode: " << result << std::endl;
+            }
+        }).detach();
     }
 }
 
@@ -415,70 +500,90 @@ void VictusFanControl::on_remove_point_clicked(GtkButton *button, gpointer data)
 
 void VictusFanControl::update_all_temperatures()
 {
-    try {
-        auto result = socket_client->send_command_async(ServerCommands::GET_ALL_TEMPS, "").get();
-        
-        if (result == "N/A" || result.empty()) {
-            gtk_label_set_text(GTK_LABEL(all_temps_label), "CPU: N/A | NVMe: N/A");
-            gtk_label_set_text(GTK_LABEL(cpu_temp_label), "CPU Cores: N/A");
-        } else {
-            // Parse format: "PKG:48|CORES:40,39,43,45,43,45,45,45,45,45|NVME:37,36"
-            std::string pkg_temp;
-            std::string nvme_temps;
-            std::string cores_temps;
+    auto client = socket_client;
+    auto all_temps_label_ptr = all_temps_label;
+    auto cpu_temp_label_ptr = cpu_temp_label;
+    
+    std::thread([client, all_temps_label_ptr, cpu_temp_label_ptr]() {
+        try {
+            auto result_future = client->send_command_async(ServerCommands::GET_ALL_TEMPS, "");
+            std::string result = result_future.get();
             
-            std::stringstream ss(result);
-            std::string section;
-            
-            while (std::getline(ss, section, '|')) {
-                if (section.find("PKG:") == 0) {
-                    pkg_temp = section.substr(4);
-                } else if (section.find("CORES:") == 0) {
-                    cores_temps = section.substr(6);
-                } else if (section.find("NVME:") == 0) {
-                    nvme_temps = section.substr(5);
-                }
-            }
-            
-            // Display system temperatures at top with colored package temp
-            if (!pkg_temp.empty()) {
-                std::string display = "<span foreground='#FF6600'><b>CPU: " + pkg_temp + "°C</b></span>";
+            if (result == "N/A" || result.empty()) {
+                g_idle_add([](gpointer user_data) -> gboolean {
+                    TempData *data = static_cast<TempData*>(user_data);
+                    gtk_label_set_text(GTK_LABEL(data->all_temps_label), "CPU: N/A | NVMe: N/A");
+                    gtk_label_set_text(GTK_LABEL(data->cpu_temp_label), "CPU Cores: N/A");
+                    delete data;
+                    return G_SOURCE_REMOVE;
+                }, new TempData{"", "", "", all_temps_label_ptr, cpu_temp_label_ptr});
+            } else {
+                // Parse format: "PKG:48|CORES:40,39,43,45,43,45,45,45,45,45|NVME:37,36"
+                std::string pkg_temp;
+                std::string nvme_temps;
+                std::string cores_temps;
                 
-                // Add all NVMe temps
-                if (!nvme_temps.empty()) {
-                    std::stringstream nvme_ss(nvme_temps);
-                    std::string nvme_temp;
-                    int nvme_num = 1;
-                    
-                    while (std::getline(nvme_ss, nvme_temp, ',')) {
-                        display += " | NVMe" + std::to_string(nvme_num) + ": " + nvme_temp + "°C";
-                        nvme_num++;
+                std::stringstream ss(result);
+                std::string section;
+                
+                while (std::getline(ss, section, '|')) {
+                    if (section.find("PKG:") == 0) {
+                        pkg_temp = section.substr(4);
+                    } else if (section.find("CORES:") == 0) {
+                        cores_temps = section.substr(6);
+                    } else if (section.find("NVME:") == 0) {
+                        nvme_temps = section.substr(5);
                     }
                 }
-                
-                gtk_label_set_markup(GTK_LABEL(all_temps_label), display.c_str());
+
+                // Schedule UI update on main thread with parsed data
+                g_idle_add([](gpointer user_data) -> gboolean {
+                    TempData *data = static_cast<TempData*>(user_data);
+
+                    // Display system temperatures at top with colored package temp
+                    if (!data->pkg_temp.empty()) {
+                        std::string display = "<span foreground='#FF6600'><b>CPU: " + data->pkg_temp + "°C</b></span>";
+                        
+                        // Add all NVMe temps
+                        if (!data->nvme_temps.empty()) {
+                            std::stringstream nvme_ss(data->nvme_temps);
+                            std::string nvme_temp;
+                            int nvme_num = 1;
+                            
+                            while (std::getline(nvme_ss, nvme_temp, ',')) {
+                                display += " | NVMe" + std::to_string(nvme_num) + ": " + nvme_temp + "°C";
+                                nvme_num++;
+                            }
+                        }
+                        
+                        gtk_label_set_markup(GTK_LABEL(data->all_temps_label), display.c_str());
+                    }
+                    
+                    // Display all CPU cores at bottom
+                    if (!data->cores_temps.empty()) {
+                        // Format cores nicely: "Core 0: 40°C, Core 1: 39°C, ..."
+                        std::stringstream cores_ss(data->cores_temps);
+                        std::string core;
+                        int core_num = 0;
+                        std::string cores_display = "CPU Cores: ";
+                        
+                        while (std::getline(cores_ss, core, ',')) {
+                            if (core_num > 0) cores_display += ", ";
+                            cores_display += "C" + std::to_string(core_num) + ":" + core + "°C";
+                            core_num++;
+                        }
+                        
+                        gtk_label_set_text(GTK_LABEL(data->cpu_temp_label), cores_display.c_str());
+                    }
+
+                    delete data;
+                    return G_SOURCE_REMOVE;
+                }, new TempData{pkg_temp, nvme_temps, cores_temps, all_temps_label_ptr, cpu_temp_label_ptr});
             }
-            
-            // Display all CPU cores at bottom
-            if (!cores_temps.empty()) {
-                // Format cores nicely: "Core 0: 40°C, Core 1: 39°C, ..."
-                std::stringstream cores_ss(cores_temps);
-                std::string core;
-                int core_num = 0;
-                std::string cores_display = "CPU Cores: ";
-                
-                while (std::getline(cores_ss, core, ',')) {
-                    if (core_num > 0) cores_display += ", ";
-                    cores_display += "C" + std::to_string(core_num) + ":" + core + "°C";
-                    core_num++;
-                }
-                
-                gtk_label_set_text(GTK_LABEL(cpu_temp_label), cores_display.c_str());
-            }
+        } catch (const std::exception &e) {
+            // Failed to get temps - silently ignore
         }
-    } catch (const std::exception &e) {
-        // Failed to get temps
-    }
+    }).detach();
 }
 
 void VictusFanControl::on_apply_profile_clicked(GtkButton *button, gpointer data)
